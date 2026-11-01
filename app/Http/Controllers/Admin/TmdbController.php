@@ -12,6 +12,7 @@ use Cviebrock\EloquentSluggable\Services\SlugService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use App\Traits\PostTrait;
 
@@ -256,5 +257,155 @@ class TmdbController extends Controller
     {
         $postArray = $this->tmdbEpisodeApiTrait($request);
         return json_encode($postArray);
+    }
+
+    public function bulkImport(Request $request)
+    {
+        $config = [
+            'title' => __('Bulk Import'),
+            'nav' => 'tool',
+        ];
+        
+        if (!config('settings.tmdb_api') || !config('settings.tmdb_language')) {
+            return redirect()->route('admin.tmdb.settings')->with('error', 'Please configure TMDB API settings first');
+        }
+
+        return view('admin.tmdb.bulk-import', compact('config'));
+    }
+
+    public function bulkImportStart(Request $request)
+    {
+        $request->validate([
+            'type' => 'required|in:movie,tv',
+            'source' => 'required|in:vidsrc'
+        ]);
+
+        $type = $request->input('type');
+        $importId = Str::random(16);
+
+        // Fetch the TMDB IDs from vidsrc
+        $url = $type === 'movie' 
+            ? 'https://vidsrc.sh/ids/movie_tmdb.txt' 
+            : 'https://vidsrc.sh/ids/tv_tmdb.txt';
+
+        try {
+            $response = Http::timeout(30)->get($url);
+            
+            if (!$response->successful()) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Failed to fetch TMDB IDs from source'
+                ], 400);
+            }
+
+            $content = $response->body();
+            $tmdbIds = array_filter(array_map('trim', explode("\n", $content)));
+
+            // Remove duplicates and already imported
+            $tmdbIds = array_unique($tmdbIds);
+            $existingIds = Post::where('type', $type)->pluck('tmdb_id')->toArray();
+            $tmdbIds = array_diff($tmdbIds, $existingIds);
+            $tmdbIds = array_values($tmdbIds);
+
+            if (empty($tmdbIds)) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'No new items to import. All items already exist in database.'
+                ], 400);
+            }
+
+            // Initialize progress cache
+            Cache::put("bulk_import_{$importId}", [
+                'total' => count($tmdbIds),
+                'processed' => 0,
+                'completed' => 0,
+                'failed' => 0,
+                'skipped' => 0,
+                'status' => 'processing',
+                'type' => $type,
+                'started_at' => now()->toDateTimeString(),
+                'items' => []
+            ], now()->addHours(24));
+
+            // Dispatch jobs
+            foreach ($tmdbIds as $tmdbId) {
+                \App\Jobs\BulkImportJob::dispatch($type, $tmdbId, $importId);
+            }
+
+            return response()->json([
+                'success' => true,
+                'import_id' => $importId,
+                'total' => count($tmdbIds),
+                'message' => 'Import started successfully'
+            ]);
+
+        } catch (\Exception $e) {
+            Log::error('Bulk import start failed', [
+                'error' => $e->getMessage()
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to start import: ' . $e->getMessage()
+            ], 500);
+        }
+    }
+
+    public function bulkImportProgress(Request $request)
+    {
+        $importId = $request->input('import_id');
+        
+        if (!$importId) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Import ID is required'
+            ], 400);
+        }
+
+        $progress = Cache::get("bulk_import_{$importId}");
+
+        if (!$progress) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Import session not found'
+            ], 404);
+        }
+
+        // Calculate progress percentage
+        $percentage = $progress['total'] > 0 
+            ? round(($progress['processed'] / $progress['total']) * 100, 2) 
+            : 0;
+
+        $progress['percentage'] = $percentage;
+        $progress['is_complete'] = $progress['processed'] >= $progress['total'];
+
+        return response()->json([
+            'success' => true,
+            'progress' => $progress
+        ]);
+    }
+
+    public function bulkImportCancel(Request $request)
+    {
+        $importId = $request->input('import_id');
+        
+        if (!$importId) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Import ID is required'
+            ], 400);
+        }
+
+        // Update cache to mark as cancelled
+        $progress = Cache::get("bulk_import_{$importId}");
+        if ($progress) {
+            $progress['status'] = 'cancelled';
+            Cache::put("bulk_import_{$importId}", $progress, now()->addHours(24));
+        }
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Import cancelled successfully'
+        ]);
     }
 }

@@ -201,6 +201,12 @@ Route::prefix('admin')->name('admin.')->middleware(['auth','auth.admin'])->group
         Route::get('tmdb-settings', 'settings')->name('settings');
         Route::post('tmdb-settings', 'update')->middleware('demo');
         Route::post('tmdb-store', 'store')->name('store')->middleware('demo');
+        
+        // Bulk Import
+        Route::get('tmdb-bulk-import', 'bulkImport')->name('bulk-import');
+        Route::post('tmdb-bulk-import-start', 'bulkImportStart')->name('bulk-import-start')->middleware('demo');
+        Route::post('tmdb-bulk-import-progress', 'bulkImportProgress')->name('bulk-import-progress');
+        Route::post('tmdb-bulk-import-cancel', 'bulkImportCancel')->name('bulk-import-cancel')->middleware('demo');
     });
 
     // Onesignal
